@@ -271,21 +271,6 @@ def train(args):
         args (Namespace): The argument namespace containing various hyperparameters.
     """
     seed_everything(42, workers=True)
-    train_loader = setup_data(
-        args,
-        root_dir=args.baseline_root_dir,
-        massive_neutrinos=False,
-        idx_range=range(args.n_baseline),
-        cosmological_parameters=args.cosmological_parameters,
-        shuffle=True,
-    )
-    val_loader = setup_data(
-        args,
-        root_dir=args.baseline_root_dir,
-        massive_neutrinos=False,
-        idx_range=range(args.n_baseline, args.n_baseline + args.n_val),
-        cosmological_parameters=args.cosmological_parameters,
-    )
 
     summarizer = ResNet(
         input_image_resolution=args.resolution,
@@ -311,6 +296,21 @@ def train(args):
     )
     early_callback = EarlyStopping(monitor="baseline_val_loss", mode="min")
     if args.n_baseline > 0:
+        train_loader = setup_data(
+            args,
+            root_dir=args.baseline_root_dir,
+            massive_neutrinos=False,
+            idx_range=range(args.n_baseline),
+            cosmological_parameters=args.cosmological_parameters,
+            shuffle=True,
+        )
+        val_loader = setup_data(
+            args,
+            root_dir=args.baseline_root_dir,
+            massive_neutrinos=False,
+            idx_range=range(args.n_baseline, args.n_baseline + args.n_val),
+            cosmological_parameters=args.cosmological_parameters,
+        )
         trainer = setup_trainer(
             args, args.total_steps, wandb_logger, checkpoint_callback, early_callback
         )
