@@ -37,6 +37,7 @@ class Quijote(VisionDataset):
         fnl: bool = False,
         idx_list: Optional[List[int]] = None,
         dim: str = '2d',
+        units: str = 'delta',
     ):
         super().__init__(
             root,
@@ -53,6 +54,7 @@ class Quijote(VisionDataset):
             self.resize = None
         self.resolution = resolution
         self.dim = dim
+        self.units = units
         self.norm_dict = QUIJOTE_STATS_2D if self.dim == '2d' else QUIJOTE_STATS_3D
         self._load_cosmologies(cosmological_parameters=cosmological_parameters)
 
@@ -108,8 +110,11 @@ class Quijote(VisionDataset):
 
         if self.resize is not None:
             density = self.resize(density[None]).squeeze()
-        #density = density / density.mean() - 1
-        density = (density - self.norm_dict[f"{self.resolution}"][0]) / self.norm_dict[f"{self.resolution}"][1]
+        if self.units == 'delta':
+            density = density / density.mean() - 1
+            density /= self.norm_dict[f"{self.resolution}"][1]
+        else:
+            density = (density - self.norm_dict[f"{self.resolution}"][0]) / self.norm_dict[f"{self.resolution}"][1]
         return torch.from_numpy(density).float()
 
     def __getitem__(

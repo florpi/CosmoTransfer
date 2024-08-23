@@ -323,15 +323,15 @@ def train(args):
     run_name = wandb_logger.experiment.name
     checkpoint_callback = ModelCheckpoint(
         dirpath=Path(args.output_dir) / f"{run_name}",
-        save_top_k=1,
+        save_top_k=3,
         monitor="baseline_val_loss",
         save_last=True,
         auto_insert_metric_name=True,
         every_n_train_steps=args.save_every,
     )
     early_callback = EarlyStopping(monitor="baseline_val_loss", mode="min", patience=20,)
-    baseline_massive_neutrinos = True if 'M_nu' in args.cosmological_parameters else False
-    few_shot_massive_neutrinos = True if 'M_nu' in args.few_shot_cosmological_parameters else False
+    baseline_massive_neutrinos = True if 'M_nu' in  args.cosmological_parameters or 'w' in args.cosmological_parameters else False
+    few_shot_massive_neutrinos = True if 'M_nu' in args.few_shot_cosmological_parameters or 'w' in args.few_shot_cosmological_parameters else False
     if baseline_massive_neutrinos:
         baseline_root_dir = root_dir / 'latin_hypercube_nwLH/'
     else:
@@ -407,7 +407,7 @@ def train(args):
         )
         checkpoint_callback = ModelCheckpoint(
             dirpath=Path(args.output_dir) / f"{run_name}_few_shot",
-            save_top_k=1,
+            save_top_k=3,
             monitor="few_shot_val_loss",
             save_last=True,
             auto_insert_metric_name=True,
@@ -426,7 +426,7 @@ def train(args):
             train_dataloaders=few_shot_train_loader,
             val_dataloaders=few_shot_val_loader,
         )
-        few_shot_trainer.test(dataloaders=few_shot_test_loader)
+        few_shot_trainer.test(dataloaders=few_shot_test_loader, ckpt_path="best")
 
 
 if __name__ == "__main__":
