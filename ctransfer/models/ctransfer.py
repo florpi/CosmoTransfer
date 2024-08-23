@@ -1,7 +1,30 @@
 import torch
 import zuko
+import matplotlib.pyplot as plt
+import numpy as np
+import wandb
+import io
+from PIL import Image
 from lightning import LightningModule
 
+
+def log_matplotlib_figure(figure_label: str):
+    """log a matplotlib figure to wandb, avoiding plotly
+
+    Args:
+        figure_label (str): label for figure
+    """
+    # Save plot to a buffer, otherwise wandb does ugly plotly
+    buf = io.BytesIO()
+    plt.savefig(
+        buf,
+        format="png",
+        dpi=300,
+    )
+    buf.seek(0)
+    image = Image.open(buf)
+    # Log the plot to wandb
+    wandb.log({f"{figure_label}": wandb.Image(image)})
 
 class cTransfer(LightningModule):
     """
@@ -22,11 +45,12 @@ class cTransfer(LightningModule):
     def __init__(
         self,
         summarizer: torch.nn.Module,
+        summary_dim: int,
         n_features: int,
         freeze_summarizer: bool = False,
         n_transforms: int = 5,
         learning_rate: float = 1.0e-4,
-        scheduler_patience: int = 5,
+        scheduler_patience: int = 10,
         phase: str = 'baseline',
     ):
         """
@@ -45,13 +69,14 @@ class cTransfer(LightningModule):
         super().__init__()
 
         self.save_hyperparameters(ignore=["summarizer"])
-        self.save_hyperparameters({"summarizer_hparams": summarizer.hparams})
+        self.summary_dim = summary_dim
+        #self.save_hyperparameters({"summarizer_hparams": summarizer.hparams})
         self.freeze_summarizer = freeze_summarizer
         self.validation_step_outputs = []
         self.summarizer = summarizer
         self.density_estimator = zuko.flows.MAF(
             features=n_features,
-            context=summarizer.summary_dim,
+            context=self.summary_dim,
             transforms=n_transforms,
         )
         self.phase = phase
@@ -97,7 +122,7 @@ class cTransfer(LightningModule):
         x, y = batch
         embedding = self.summarizer(x)
         loss = self.get_loss(embedding, y)
-        self.log(f"{self.phase}_train_loss", loss, prog_bar=True, sync_dist=True)
+        self.log(f"{self.phase}_train_loss", loss, prog_bar=True, sync_dist=True, logger=True,)
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int):
@@ -115,7 +140,7 @@ class cTransfer(LightningModule):
             f"{self.phase}_val_loss": loss,
             "batch": batch,
         }
-        self.log(f"{self.phase}_val_loss", loss, prog_bar=True, sync_dist=True)
+        self.log(f"{self.phase}_val_loss", loss, prog_bar=True, sync_dist=True, logger=True,)
 
         self.validation_step_outputs.append(output_dict)
 
@@ -133,8 +158,33 @@ class cTransfer(LightningModule):
         x, y = batch
         embedding = self.summarizer(x)
         loss = self.get_loss(embedding, y)
-        self.log(f"{self.phase}_test_loss", loss, prog_bar=True, sync_dist=True)
+        self.log(f"{self.phase}_test_loss", loss, prog_bar=True, sync_dist=True, logger=True,)
         return loss
+
+    def _log_pred_vs_true(self, batch, n_samples=(100,)):
+        x, y = batch
+        embedding = self.summarizer(x)
+        predictions = self.density_estimator(embedding).sample(n_samples)
+        fig, ax = plt.subplots(ncols=y.shape[-1], figsize=(5*y.shape[-1], 5))
+        for i in range(y.shape[-1]):
+            ax[i].plot(
+                y[:,i].cpu().numpy(), 
+                y[:,i].cpu().numpy(), 
+                linestyle='dashed',
+                color='lightgray'
+            )
+            ax[i].errorbar(
+                y[:,i].cpu().numpy(), 
+                np.mean(predictions[...,i].cpu().numpy(),axis=0), 
+                yerr=np.std(predictions[...,i].cpu().numpy(),axis=0), 
+                alpha=0.5,
+                linestyle='None',
+                markersize=3,
+                fmt='o',
+            
+            )
+        log_matplotlib_figure(f"true vs pred | {self.phase}")
+        plt.close()
 
 
     def on_validation_epoch_end(self):
@@ -151,8 +201,8 @@ class cTransfer(LightningModule):
             sync_dist=True,
         )
         # Add if want to add any validation figures
-        # batch =  self.validation_step_outputs[-1]['batch']
-        # self._log_figures(batch)
+        batch =  self.validation_step_outputs[0]['batch']
+        self._log_pred_vs_true(batch)
         self.validation_step_outputs.clear()
 
     def configure_optimizers(self) -> dict:

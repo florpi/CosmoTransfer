@@ -12,6 +12,7 @@ from lightning.pytorch import seed_everything
 from ctransfer.models.resnet import ResNet
 from ctransfer.models.ctransfer import cTransfer
 
+import timm
 
 parser = ArgumentParser()
 
@@ -21,19 +22,27 @@ parser.add_argument(
     help="output_directory",
     required=False,
 )
+parser.add_argument(
+    "--run_name",
+    default=None,
+    help="run name",
+    type=str,
+    required=False,
+)
 # Data hparams
 parser.add_argument(
-    "--baseline_root_dir",
-    default="/n/holyscratch01/iaifi_lab/Lab/quijote_large/density_fields/",
+    "--root_dir",
+    default="/n/holystore01/LABS/iaifi_lab/Users/ccuestalazaro/cosmo_transfer/",
     help="directory with baseline density fields",
     required=False,
 )
 parser.add_argument(
-    "--few_shot_root_dir",
-    default="/n/holyscratch01/iaifi_lab/Lab/quijote_neutrinos/density_fields/",
-    help="directory with few shot density fields",
+    "--dim",
+    default=2,
+    help="dimension of the density field",
     required=False,
 )
+
 parser.add_argument(
     "--n_baseline",
     default=10_000,
@@ -43,27 +52,27 @@ parser.add_argument(
 )
 parser.add_argument(
     "--n_val",
-    default=20,
+    default=50,
     help="number of images to use for evaluation",
     required=False,
 )
 parser.add_argument(
     "--n_shots",
-    default=80,
+    default=100,
     type=int,
     help="number of transfer samples used for training",
     required=False,
 )
 parser.add_argument(
     "--n_shots_val",
-    default=10,
+    default=50,
     type=int,
     help="number of transfer samples used for validation",
     required=False,
 )
 parser.add_argument(
     "--n_shots_test",
-    default=10,
+    default=50,
     type=int,
     help="number of transfer samples used for testing",
     required=False,
@@ -78,7 +87,7 @@ parser.add_argument(
 parser.add_argument(
     "--cosmological_parameters",
     default=["Omega_m", "Omega_b", "h", "n_s", "sigma_8"],
-    type=int,
+    nargs='+',
     help="Cosmo params to fit",
     required=False,
 )
@@ -86,23 +95,37 @@ parser.add_argument(
 parser.add_argument(
     "--few_shot_cosmological_parameters",
     default=["M_nu", "w"],
-    type=int,
+    nargs="+",
     help="Cosmo params to fine tune",
     required=False,
+)
+
+parser.add_argument(
+    "--freeze_summarizer",
+    action="store_true",  # Sets to True if the flag is provided
+    help="Whether to freeze the summarizer",
 )
 
 
 # ResNet hparams 
 parser.add_argument(
     "--summary_dim",
-    default=16,
+    default=32,
     type=int,
     help="dimensionality of the learned summary statistic",
     required=False,
 )
 parser.add_argument(
+    "--summarizer",
+    default='resnet18',
+    type=str,
+    help="summarizer to use",
+    required=False,
+)
+parser.add_argument(
     "--num_channels",
-    default=(8, 16, 16, 8, 8, 8, 4, 2, 2),
+    #default=(8, 16, 16, 8, 8, 8, 4, 2, 2),
+    default=(32, 32, 16,  8, 4,),
     type=int,
     help="base channel of ResNet",
     required=False,
@@ -140,14 +163,14 @@ parser.add_argument(
 )
 parser.add_argument(
     "--total_steps",
-    default=2_000,
+    default=10_000,
     type=int,
     help="total training steps",
     required=False,
 )
 parser.add_argument(
     "--few_shot_total_steps",
-    default=2_000,
+    default=10_000,
     type=int,
     help="total training steps when few shot learning",
     required=False,
@@ -167,7 +190,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--batch_size",
-    default=4,
+    default=12,
     type=int,
     help="batch size",
     required=False,
@@ -182,7 +205,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--num_workers",
-    default=2,
+    default=1,
     type=int,
     help="workers of Dataloader",
     required=False,
@@ -252,15 +275,13 @@ def setup_trainer(args, total_steps: int, logger: WandbLogger, checkpoint_callba
         max_steps=total_steps,
         gradient_clip_val=args.grad_clip,
         logger=logger,
-        log_every_n_steps=10,
-        check_val_every_n_epoch=None,
-        val_check_interval=args.eval_every,
-        accumulate_grad_batches=args.accumulate_gradients
-        if args.accumulate_gradients is not None
-        else 1,
+        log_every_n_steps=5,
         callbacks=[checkpoint_callback, early_callback],
-        devices=-1,
+        devices=1,
+        num_sanity_val_steps=2,
+        val_check_interval=0.25,
     )
+
 
 
 def train(args):
@@ -271,20 +292,34 @@ def train(args):
         args (Namespace): The argument namespace containing various hyperparameters.
     """
     seed_everything(42, workers=True)
+    root_dir = Path(args.root_dir)
 
-    summarizer = ResNet(
-        input_image_resolution=args.resolution,
-        block_out_channels=args.num_channels,
-        summary_dim=args.summary_dim,
-    )
+    if args.summarizer == 'resnet18':
+        summarizer = timm.create_model(
+            'resnet18', 
+            pretrained=False, 
+            in_chans=1, 
+            num_classes=args.summary_dim,
+        )
+    elif 'vit' in args.summarizer:
+        summarizer = timm.create_model(
+            'vit_base_patch16_224',  
+            pretrained=False, 
+            in_chans=1, 
+            num_classes=args.summary_dim,
+            img_size=256, #
+        )
+    else:
+        raise ValueError(f"Summarizer {args.summarizer} not implemented")
 
     model = cTransfer(
         summarizer=summarizer,
+        summary_dim=args.summary_dim,
         n_features=len(args.cosmological_parameters),
         n_transforms=args.n_transforms,
         phase='baseline',
     )
-    wandb_logger = WandbLogger(project="ctransfer", log_model=False)
+    wandb_logger = WandbLogger(project="ctransfer", log_model=False, name=args.run_name if args.run_name else None)
     run_name = wandb_logger.experiment.name
     checkpoint_callback = ModelCheckpoint(
         dirpath=Path(args.output_dir) / f"{run_name}",
@@ -294,20 +329,31 @@ def train(args):
         auto_insert_metric_name=True,
         every_n_train_steps=args.save_every,
     )
-    early_callback = EarlyStopping(monitor="baseline_val_loss", mode="min")
+    early_callback = EarlyStopping(monitor="baseline_val_loss", mode="min", patience=20,)
+    baseline_massive_neutrinos = True if 'M_nu' in args.cosmological_parameters else False
+    few_shot_massive_neutrinos = True if 'M_nu' in args.few_shot_cosmological_parameters else False
+    if baseline_massive_neutrinos:
+        baseline_root_dir = root_dir / 'latin_hypercube_nwLH/'
+    else:
+        baseline_root_dir = root_dir / 'BSQ/'
+    if few_shot_massive_neutrinos:
+        few_shot_root_dir = root_dir / 'latin_hypercube_nwLH/'
+    else:
+        few_shot_root_dir = root_dir / 'BSQ/'
     if args.n_baseline > 0:
+
         train_loader = setup_data(
             args,
-            root_dir=args.baseline_root_dir,
-            massive_neutrinos=False,
+            root_dir=baseline_root_dir,
+            massive_neutrinos=baseline_massive_neutrinos,
             idx_range=range(args.n_baseline),
             cosmological_parameters=args.cosmological_parameters,
             shuffle=True,
         )
         val_loader = setup_data(
             args,
-            root_dir=args.baseline_root_dir,
-            massive_neutrinos=False,
+            root_dir=baseline_root_dir,
+            massive_neutrinos=baseline_massive_neutrinos,
             idx_range=range(args.n_baseline, args.n_baseline + args.n_val),
             cosmological_parameters=args.cosmological_parameters,
         )
@@ -318,45 +364,47 @@ def train(args):
             model=model, train_dataloaders=train_loader, val_dataloaders=val_loader
         )
 
-    # ****** Use representation in a downstream task ****** #
-    few_shot_train_loader = setup_data(
-        args,
-        root_dir=args.few_shot_root_dir,
-        massive_neutrinos=True,
-        idx_range=range(args.n_shots),
-        cosmological_parameters=args.cosmological_parameters
-        + args.few_shot_cosmological_parameters,
-        shuffle=True,
-    )
-    few_shot_val_loader = setup_data(
-        args,
-        root_dir=args.few_shot_root_dir,
-        massive_neutrinos=True,
-        idx_range=range(args.n_shots, args.n_shots + args.n_shots_val),
-        cosmological_parameters=args.cosmological_parameters
-        + args.few_shot_cosmological_parameters,
-    )
-    few_shot_test_loader = setup_data(
-        args,
-        root_dir=args.few_shot_root_dir,
-        massive_neutrinos=True,
-        idx_range=range(
-            args.n_shots + args.n_shots_val,
-            args.n_shots + args.n_shots_val + args.n_shots_test,
-        ),
-        cosmological_parameters=args.cosmological_parameters
-        + args.few_shot_cosmological_parameters,
-    )
-    few_shot_model = cTransfer(
-        summarizer=summarizer,
-        n_features=len(
-            args.cosmological_parameters + args.few_shot_cosmological_parameters
-        ),
-        n_transforms=args.n_transforms,
-        freeze_summarizer=True if args.n_baseline > 0 else False,
-        phase='few_shot'
-    )
     if args.n_shots > 0:
+        # ****** Use representation in a downstream task ****** #
+        few_shot_massive_neutrinos = True if 'M_nu' in args.few_shot_cosmological_parameters else False
+        few_shot_train_loader = setup_data(
+            args,
+            root_dir=few_shot_root_dir,
+            massive_neutrinos=few_shot_massive_neutrinos,
+            idx_range=range(args.n_shots),
+            cosmological_parameters=args.cosmological_parameters
+            + args.few_shot_cosmological_parameters,
+            shuffle=True,
+        )
+        few_shot_val_loader = setup_data(
+            args,
+            root_dir=few_shot_root_dir,
+            massive_neutrinos=few_shot_massive_neutrinos,
+            idx_range=range(args.n_shots, args.n_shots + args.n_shots_val),
+            cosmological_parameters=args.cosmological_parameters
+            + args.few_shot_cosmological_parameters,
+        )
+        few_shot_test_loader = setup_data(
+            args,
+            root_dir=few_shot_root_dir,
+            massive_neutrinos=few_shot_massive_neutrinos,
+            idx_range=range(
+                args.n_shots + args.n_shots_val,
+                args.n_shots + args.n_shots_val + args.n_shots_test,
+            ),
+            cosmological_parameters=args.cosmological_parameters
+            + args.few_shot_cosmological_parameters,
+        )
+        few_shot_model = cTransfer(
+            summarizer=summarizer,
+            summary_dim=args.summary_dim,
+            n_features=len(
+                args.cosmological_parameters + args.few_shot_cosmological_parameters
+            ),
+            n_transforms=args.n_transforms,
+            freeze_summarizer=True if args.n_baseline > 0 and args.freeze_summarizer else False,
+            phase='few_shot'
+        )
         checkpoint_callback = ModelCheckpoint(
             dirpath=Path(args.output_dir) / f"{run_name}_few_shot",
             save_top_k=1,
@@ -365,7 +413,7 @@ def train(args):
             auto_insert_metric_name=True,
             every_n_train_steps=args.save_every,
         )
-        early_callback = EarlyStopping(monitor="few_shot_val_loss", mode="min")
+        early_callback = EarlyStopping(monitor="few_shot_val_loss", mode="min", patience=20)
         few_shot_trainer = setup_trainer(
             args,
             args.few_shot_total_steps,

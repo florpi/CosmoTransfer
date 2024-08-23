@@ -2,9 +2,6 @@ from typing import Callable, Optional, List, Tuple
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import numpy as np
-import math
-
 
 @torch.no_grad()
 def zero_init(module: nn.Module) -> nn.Module:
@@ -27,25 +24,6 @@ def get_conv(
     weight_init: Callable = None,
     transposed: bool = False,
 ) -> nn.Module:
-    """
-    Create a convolutional layer (2D or 3D) with specified parameters.
-
-    Parameters:
-    - input_channels: Number of input channels.
-    - output_channels: Number of output channels.
-    - dim: Dimension of the convolution (2 or 3).
-    - kernel_size: Size of the convolutional kernel.
-    - padding: Padding size.
-    - padding_mode: Type of padding.
-    - stride: Stride size.
-    - dilation: Dilation rate.
-    - groups: Number of blocked connections.
-    - weight_init: Weight initialization function.
-    - transposed: Whether to use a transposed convolution.
-
-    Returns:
-    - A convolutional layer with specified parameters.
-    """
     if weight_init is None:
         weight_init = lambda x: x
 
@@ -64,157 +42,14 @@ def get_conv(
         padding_mode=padding_mode,
         stride=stride,
         dilation=dilation,
-        # groups=groups,
+        groups=groups,
     )
     if weight_init is not None:
         out = weight_init(out)
     return out
 
 
-def get_down_block(
-    num_resnet_blocks: int,
-    input_channels: int,
-    output_channels: int,
-    activation_fn,
-    kernel_size,
-    padding,
-    padding_mode,
-    conditioning_dim: int,
-    dropout_prob: float,
-    num_groups_norm: int,
-    interpolate_down: bool = True,
-    add_downsample: bool = True,
-):
-    return ResNetDownsampleBlock(
-        num_layers=num_resnet_blocks,
-        input_channels=input_channels,
-        output_channels=output_channels,
-        activation_fn=activation_fn,
-        kernel_size=kernel_size,
-        padding=padding,
-        padding_mode=padding_mode,
-        conditioning_dim=conditioning_dim,
-        dropout_prob=dropout_prob,
-        num_groups_norm=num_groups_norm,
-        add_downsample=add_downsample,
-        use_conv=not interpolate_down,
-    )
-
-
-def get_up_block(
-    num_resnet_blocks: int,
-    input_channels: int,
-    output_channels: int,
-    prev_output_channels: int,
-    activation_fn,
-    kernel_size,
-    padding,
-    padding_mode,
-    conditioning_dim: int,
-    dropout_prob: float,
-    num_groups_norm: int,
-    add_upsample: bool,
-    interpolate_up: bool = True,
-    transpose_conv: bool = False,
-):
-    return ResNetUpsampleBlock(
-        num_layers=num_resnet_blocks,
-        input_channels=input_channels,
-        output_channels=output_channels,
-        prev_output_channels=prev_output_channels,
-        conditioning_dim=conditioning_dim,
-        dropout_prob=dropout_prob,
-        num_groups_norm=num_groups_norm,
-        activation_fn=activation_fn,
-        kernel_size=kernel_size,
-        padding=padding,
-        padding_mode=padding_mode,
-        add_upsample=add_upsample,
-        use_conv=(not transpose_conv) & (not interpolate_up),
-        use_conv_transpose=(transpose_conv) & (not interpolate_up),
-    )
-
-
-def get_mid_block(
-    num_resnet_blocks: int,
-    input_channels: int,
-    output_channels: int,
-    conditioning_dim: int,
-    dropout_prob: float,
-    num_groups_norm: int,
-    activation_fn,
-    kernel_size,
-    padding,
-    padding_mode,
-):
-    return MidBlock(
-        num_resnet_blocks=num_resnet_blocks,
-        input_channels=input_channels,
-        output_channels=output_channels,
-        conditioning_dim=conditioning_dim,
-        dropout_prob=dropout_prob,
-        num_groups_norm=num_groups_norm,
-        activation_fn=activation_fn,
-        kernel_size=kernel_size,
-        padding=padding,
-        padding_mode=padding_mode,
-    )
-
-
-class MidBlock(nn.Module):
-    def __init__(
-        self,
-        num_resnet_blocks,
-        input_channels,
-        output_channels,
-        conditioning_dim,
-        dropout_prob,
-        num_groups_norm,
-        activation_fn,
-        kernel_size,
-        padding,
-        padding_mode,
-    ):
-        super(MidBlock, self).__init__()
-        self.layers = nn.Sequential(
-            *[
-                ResNetBlock(
-                    input_channels=input_channels if i == 0 else output_channels,
-                    output_channels=output_channels,
-                    conditioning_dim=conditioning_dim,
-                    dropout_prob=dropout_prob,
-                    num_groups_norm=num_groups_norm,
-                    activation_fn=activation_fn,
-                    kernel_size=kernel_size,
-                    padding=padding,
-                    padding_mode=padding_mode,
-                )
-                for i in range(num_resnet_blocks)
-            ]
-        )
-
-    def forward(self, x, conditioning):
-        for layer in self.layers:
-            x = layer(x, conditioning)
-        return x
-
-
-class Downsample3D(nn.Module):
-    """A 3D downsampling layer with an optional convolution.
-
-    Parameters:
-        channels (`int`):
-            number of channels in the inputs and outputs.
-        use_conv (`bool`, default `False`):
-            option to use a convolution.
-        out_channels (`int`, optional):
-            number of output channels. Defaults to `channels`.
-        padding (`int`, default `1`):
-            padding for the convolution.
-        name (`str`, default `conv`):
-            name of the downsampling 2D layer.
-    """
-
+class Downsample(nn.Module):
     def __init__(
         self,
         channels: int,
@@ -225,6 +60,7 @@ class Downsample3D(nn.Module):
         name: str = "conv",
         kernel_size=3,
         bias=True,
+        dim: int = 3,
     ):
         super().__init__()
         self.channels = channels
@@ -233,23 +69,33 @@ class Downsample3D(nn.Module):
         self.padding = padding
         stride = 2
         self.name = name
+        self.dim = dim
 
         if use_conv:
-            conv = nn.Conv3d(
-                self.channels,
-                self.out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                bias=bias,
-                padding_mode=padding_mode,
-            )
+            if dim == 2:
+                conv = nn.Conv2d(
+                    self.channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    bias=bias,
+                    padding_mode=padding_mode,
+                )
+            else:
+                conv = nn.Conv3d(
+                    self.channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    bias=bias,
+                    padding_mode=padding_mode,
+                )
         else:
             assert self.channels == self.out_channels
-            conv = nn.AvgPool3d(
-                kernel_size=stride,
-                stride=stride,
-            )
+            conv = nn.AvgPool2d(kernel_size=stride, stride=stride) if dim == 2 else nn.AvgPool3d(kernel_size=stride, stride=stride)
+
         self.conv = conv
 
     def forward(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor:
@@ -258,22 +104,7 @@ class Downsample3D(nn.Module):
         return hidden_states
 
 
-class Upsample3D(nn.Module):
-    """A 3D upsampling layer with an optional convolution.
-
-    Parameters:
-        channels (`int`):
-            number of channels in the inputs and outputs.
-        use_conv (`bool`, default `False`):
-            option to use a convolution.
-        use_conv_transpose (`bool`, default `False`):
-            option to use a convolution transpose.
-        out_channels (`int`, optional):
-            number of output channels. Defaults to `channels`.
-        name (`str`, default `conv`):
-            name of the upsampling 2D layer.
-    """
-
+class Upsample(nn.Module):
     def __init__(
         self,
         channels: int,
@@ -286,6 +117,7 @@ class Upsample3D(nn.Module):
         padding_mode: str = "circular",
         bias=True,
         interpolate=True,
+        dim: int = 3,
     ):
         super().__init__()
         self.channels = channels
@@ -294,31 +126,53 @@ class Upsample3D(nn.Module):
         self.use_conv_transpose = use_conv_transpose
         self.name = name
         self.interpolate = interpolate
+        self.dim = dim
 
         conv = None
         if use_conv_transpose:
             if kernel_size is None:
                 kernel_size = 4
-            conv = nn.ConvTranspose3d(
-                channels,
-                self.out_channels,
-                kernel_size=kernel_size,
-                stride=2,
-                padding=padding,
-                padding_mode=padding_mode,
-                bias=bias,
-            )
+            if dim == 2:
+                conv = nn.ConvTranspose2d(
+                    channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    stride=2,
+                    padding=padding,
+                    padding_mode=padding_mode,
+                    bias=bias,
+                )
+            else:
+                conv = nn.ConvTranspose3d(
+                    channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    stride=2,
+                    padding=padding,
+                    padding_mode=padding_mode,
+                    bias=bias,
+                )
         elif use_conv:
             if kernel_size is None:
                 kernel_size = 3
-            conv = nn.Conv3d(
-                self.channels,
-                self.out_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                bias=bias,
-                padding_mode=padding_mode,
-            )
+            if dim == 2:
+                conv = nn.Conv2d(
+                    self.channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    bias=bias,
+                    padding_mode=padding_mode,
+                )
+            else:
+                conv = nn.Conv3d(
+                    self.channels,
+                    self.out_channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    bias=bias,
+                    padding_mode=padding_mode,
+                )
         self.conv = conv
 
     def forward(
@@ -348,24 +202,6 @@ class Upsample3D(nn.Module):
 
 
 class ResNetBlock(nn.Module):
-    """
-    Residual Block with optional conditioning for 2D or 3D convolutions.
-
-    Parameters:
-    - input_channels: Number of input channels.
-    - output_channels: Number of output channels.
-    - activation_fn: Activation function to use.
-    - kernel_size: Size of the convolutional kernel.
-    - padding: Padding size.
-    - padding_mode: Type of padding for convolutions.
-    - dim: Dimension of the convolution (default is 2).
-    - conditioning_dim: Dimension of the conditioning vector (default is None).
-    - dropout_prob: Dropout probability (default is 0.0).
-    - num_groups: Number of groups for GroupNorm (default is 8).
-    - norm_eps: Epsilon for GroupNorm (default is 1e-5).
-    - norm_affine: Affine parameter for GroupNorm (default is True).
-    """
-
     def __init__(
         self,
         input_channels: int,
@@ -374,6 +210,7 @@ class ResNetBlock(nn.Module):
         kernel_size: int,
         padding: int,
         padding_mode: str,
+        dim: int = 3,
         conditioning_dim: Optional[int] = None,
         dropout_prob: float = 0.0,
         num_groups_norm: int = 8,
@@ -393,6 +230,7 @@ class ResNetBlock(nn.Module):
         self.padding_mode = padding_mode
         self.up = up
         self.down = down
+        self.dim = dim
 
         self.norm1 = nn.GroupNorm(
             num_channels=input_channels,
@@ -403,10 +241,11 @@ class ResNetBlock(nn.Module):
         self.conv1 = get_conv(
             input_channels,
             output_channels,
+            dim=dim,
             kernel_size=kernel_size,
             padding=padding,
             padding_mode=padding_mode,
-        )  # groups=num_groups_cnn,),
+        )
 
         if conditioning_dim is not None:
             self.conditioning_embedding = nn.Sequential(
@@ -425,50 +264,52 @@ class ResNetBlock(nn.Module):
         self.conv2 = get_conv(
             output_channels,
             output_channels,
+            dim=dim,
             kernel_size=kernel_size,
             padding=padding,
             padding_mode=padding_mode,
-        )  # groups=num_groups_cnn,)
+        )
         self.nonlinearity = activation_fn
         self.upsample = self.downsample = None
         if self.up:
-            self.upsample = Upsample3D(
+            self.upsample = Upsample(
                 input_channels,
                 use_conv=use_conv_up,
                 use_conv_transpose=use_conv_transpose_up,
+                dim=dim,
             )
         elif self.down:
-            self.downsample = Downsample3D(
-                input_channels, use_conv=use_conv_down, padding=1, name="op"
+            self.downsample = Downsample(
+                input_channels, use_conv=use_conv_down, padding=1, name="op", dim=dim
             )
         self.use_in_shortcut = input_channels != output_channels
 
         self.conv_shortcut = None
         if self.use_in_shortcut:
-            self.conv_shortcut = nn.Conv3d(
-                input_channels,
-                output_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                padding_mode=padding_mode,
-                bias=True,
-            )
+            if dim == 2:
+                self.conv_shortcut = nn.Conv2d(
+                    input_channels,
+                    output_channels,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    padding_mode=padding_mode,
+                    bias=True,
+                )
+            else:
+                self.conv_shortcut = nn.Conv3d(
+                    input_channels,
+                    output_channels,
+                    kernel_size=1,
+                    stride=1,
+                    padding=0,
+                    padding_mode=padding_mode,
+                    bias=True,
+                )
 
     def forward(
         self, x: torch.Tensor, conditioning: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through the ResNet blocks and downsampling layer.
-
-
-        Parameters:
-        - x: Input tensor.
-        - conditioning: Optional conditioning tensor.
-
-        Returns:
-        - Downsampled tensor and tensor before downsampling (skip connection).
-        """
         hidden_states = x
         hidden_states = self.norm1(hidden_states)
         hidden_states = self.nonlinearity(hidden_states)
@@ -513,6 +354,7 @@ class ResNetDownsampleBlock(nn.Module):
         num_groups_norm: int = 32,
         add_downsample: bool = True,
         use_conv: bool = False,
+        dim: int = 3,
     ):
         super().__init__()
         resnets = []
@@ -531,6 +373,7 @@ class ResNetDownsampleBlock(nn.Module):
                     dropout_prob=dropout_prob,
                     num_groups_norm=num_groups_norm,
                     norm_eps=norm_eps,
+                    dim=dim,
                 )
             )
 
@@ -552,6 +395,7 @@ class ResNetDownsampleBlock(nn.Module):
                         norm_eps=norm_eps,
                         down=True,
                         use_conv_down=use_conv,
+                        dim=dim,
                     )
                 ]
             )
@@ -597,6 +441,7 @@ class ResNetUpsampleBlock(nn.Module):
         add_upsample: bool = True,
         use_conv: bool = False,
         use_conv_transpose: bool = False,
+        dim: int = 3,
     ):
         super().__init__()
         resnets = []
@@ -619,6 +464,7 @@ class ResNetUpsampleBlock(nn.Module):
                     dropout_prob=dropout_prob,
                     num_groups_norm=num_groups_norm,
                     norm_eps=norm_eps,
+                    dim=dim,
                 )
             )
 
@@ -641,6 +487,7 @@ class ResNetUpsampleBlock(nn.Module):
                         up=True,
                         use_conv_up=use_conv,
                         use_conv_transpose_up=use_conv_transpose,
+                        dim=dim,
                     )
                 ]
             )
@@ -664,3 +511,199 @@ class ResNetUpsampleBlock(nn.Module):
                 hidden_states = upsampler(hidden_states, conditioning)
 
         return hidden_states
+
+def get_down_block(
+    num_resnet_blocks: int,
+    input_channels: int,
+    output_channels: int,
+    activation_fn,
+    kernel_size: int,
+    padding: int,
+    padding_mode: str,
+    conditioning_dim: int,
+    dropout_prob: float,
+    num_groups_norm: int,
+    interpolate_down: bool = True,
+    add_downsample: bool = True,
+    dim: int = 3,  # New argument for dimension
+) -> nn.Module:
+    """
+    Create a downsampling block with multiple ResNet layers and an optional downsampling layer.
+
+    Parameters:
+    - num_resnet_blocks: Number of ResNet blocks.
+    - input_channels: Number of input channels.
+    - output_channels: Number of output channels.
+    - activation_fn: Activation function.
+    - kernel_size: Size of the convolutional kernel.
+    - padding: Padding size.
+    - padding_mode: Type of padding.
+    - conditioning_dim: Dimension of the conditioning vector.
+    - dropout_prob: Dropout probability.
+    - num_groups_norm: Number of groups for GroupNorm.
+    - interpolate_down: Whether to use interpolation for downsampling.
+    - add_downsample: Whether to add a downsampling layer.
+    - dim: Dimension of the operations (2D or 3D).
+
+    Returns:
+    - A ResNetDownsampleBlock module.
+    """
+    return ResNetDownsampleBlock(
+        num_layers=num_resnet_blocks,
+        input_channels=input_channels,
+        output_channels=output_channels,
+        activation_fn=activation_fn,
+        kernel_size=kernel_size,
+        padding=padding,
+        padding_mode=padding_mode,
+        conditioning_dim=conditioning_dim,
+        dropout_prob=dropout_prob,
+        num_groups_norm=num_groups_norm,
+        add_downsample=add_downsample,
+        use_conv=not interpolate_down,
+        dim=dim,
+    )
+
+
+def get_up_block(
+    num_resnet_blocks: int,
+    input_channels: int,
+    output_channels: int,
+    prev_output_channels: int,
+    activation_fn,
+    kernel_size: int,
+    padding: int,
+    padding_mode: str,
+    conditioning_dim: int,
+    dropout_prob: float,
+    num_groups_norm: int,
+    add_upsample: bool,
+    interpolate_up: bool = True,
+    transpose_conv: bool = False,
+    dim: int = 3,  # New argument for dimension
+) -> nn.Module:
+    """
+    Create an upsampling block with multiple ResNet layers and an optional upsampling layer.
+
+    Parameters:
+    - num_resnet_blocks: Number of ResNet blocks.
+    - input_channels: Number of input channels.
+    - output_channels: Number of output channels.
+    - prev_output_channels: Number of previous output channels.
+    - activation_fn: Activation function.
+    - kernel_size: Size of the convolutional kernel.
+    - padding: Padding size.
+    - padding_mode: Type of padding.
+    - conditioning_dim: Dimension of the conditioning vector.
+    - dropout_prob: Dropout probability.
+    - num_groups_norm: Number of groups for GroupNorm.
+    - add_upsample: Whether to add an upsampling layer.
+    - interpolate_up: Whether to use interpolation for upsampling.
+    - transpose_conv: Whether to use a transposed convolution for upsampling.
+    - dim: Dimension of the operations (2D or 3D).
+
+    Returns:
+    - A ResNetUpsampleBlock module.
+    """
+    return ResNetUpsampleBlock(
+        num_layers=num_resnet_blocks,
+        input_channels=input_channels,
+        output_channels=output_channels,
+        prev_output_channels=prev_output_channels,
+        conditioning_dim=conditioning_dim,
+        dropout_prob=dropout_prob,
+        num_groups_norm=num_groups_norm,
+        activation_fn=activation_fn,
+        kernel_size=kernel_size,
+        padding=padding,
+        padding_mode=padding_mode,
+        add_upsample=add_upsample,
+        use_conv=(not transpose_conv) & (not interpolate_up),
+        use_conv_transpose=(transpose_conv) & (not interpolate_up),
+        dim=dim,
+    )
+
+class MidBlock(nn.Module):
+    def __init__(
+        self,
+        num_resnet_blocks: int,
+        input_channels: int,
+        output_channels: int,
+        conditioning_dim: int,
+        dropout_prob: float,
+        num_groups_norm: int,
+        activation_fn: Callable,
+        kernel_size: int,
+        padding: int,
+        padding_mode: str,
+        dim: int = 3,  # New argument for dimension
+    ):
+        super(MidBlock, self).__init__()
+        self.layers = nn.Sequential(
+            *[
+                ResNetBlock(
+                    input_channels=input_channels if i == 0 else output_channels,
+                    output_channels=output_channels,
+                    activation_fn=activation_fn,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    padding_mode=padding_mode,
+                    conditioning_dim=conditioning_dim,
+                    dropout_prob=dropout_prob,
+                    num_groups_norm=num_groups_norm,
+                    dim=dim,  # Pass the dimension argument to ResNetBlock
+                )
+                for i in range(num_resnet_blocks)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor, conditioning: Optional[torch.Tensor] = None) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x, conditioning)
+        return x
+
+def get_mid_block(
+    num_resnet_blocks: int,
+    input_channels: int,
+    output_channels: int,
+    conditioning_dim: int,
+    dropout_prob: float,
+    num_groups_norm: int,
+    activation_fn,
+    kernel_size: int,
+    padding: int,
+    padding_mode: str,
+    dim: int = 3,  # New argument for dimension
+) -> nn.Module:
+    """
+    Create a middle block consisting of multiple ResNet layers.
+
+    Parameters:
+    - num_resnet_blocks: Number of ResNet blocks.
+    - input_channels: Number of input channels.
+    - output_channels: Number of output channels.
+    - conditioning_dim: Dimension of the conditioning vector.
+    - dropout_prob: Dropout probability.
+    - num_groups_norm: Number of groups for GroupNorm.
+    - activation_fn: Activation function.
+    - kernel_size: Size of the convolutional kernel.
+    - padding: Padding size.
+    - padding_mode: Type of padding.
+    - dim: Dimension of the operations (2D or 3D).
+
+    Returns:
+    - A MidBlock module.
+    """
+    return MidBlock(
+        num_resnet_blocks=num_resnet_blocks,
+        input_channels=input_channels,
+        output_channels=output_channels,
+        conditioning_dim=conditioning_dim,
+        dropout_prob=dropout_prob,
+        num_groups_norm=num_groups_norm,
+        activation_fn=activation_fn,
+        kernel_size=kernel_size,
+        padding=padding,
+        padding_mode=padding_mode,
+        dim=dim,
+    )

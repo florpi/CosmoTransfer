@@ -13,6 +13,7 @@ class ResNet(nn.Module):
         self,
         input_image_resolution: int = 256,
         in_channels: int = 1,
+        dim: int = 3,
         block_out_channels: Tuple[int, ...] = (32, 64, 64, 16, 16, 4, 4, 4),
         layers_per_block: int = 2,
         act_fn: str = "SiLU",
@@ -36,6 +37,7 @@ class ResNet(nn.Module):
         self.downsample_padding = downsample_padding
         self.interpolate_down = interpolate_down
         self.summary_dim = summary_dim
+        self.dim = dim
 
         activation_fn = getattr(nn, act_fn)()
 
@@ -44,6 +46,7 @@ class ResNet(nn.Module):
         self.conv_in = get_conv(
             in_channels,
             block_out_channels[0],
+            dim=dim,
             kernel_size=conv_kernel_size,
             padding=padding,
             padding_mode=conv_padding_mode,
@@ -69,6 +72,7 @@ class ResNet(nn.Module):
                 padding_mode=conv_padding_mode,
                 add_downsample=not is_final_block,
                 interpolate_down=interpolate_down,
+                dim=dim,
             )
             self.down_blocks.append(down_block)
             if not is_final_block:
@@ -86,10 +90,13 @@ class ResNet(nn.Module):
             kernel_size=conv_kernel_size,
             padding=1,
             padding_mode=conv_padding_mode,
+            dim=dim,
         )
+
+        # Adapt the fully connected layer for both 2D and 3D cases
         self.fc = nn.Linear(
-            output_channel * current_size * current_size * current_size, summary_dim
-        )  # Adjust the dimensions based on your output shape
+            output_channel * (current_size ** dim), summary_dim
+        )
 
     @property
     def hparams(
@@ -106,6 +113,7 @@ class ResNet(nn.Module):
             "conv_kernel_size": self.conv_kernel_size,
             "conv_padding_mode": self.conv_padding_mode,
             "summary_dim": self.summary_dim,
+            "dim": self.dim,
         }
 
     def forward(
@@ -122,7 +130,9 @@ class ResNet(nn.Module):
         # 3. mid
         if self.mid_block is not None:
             x = self.mid_block(x, conditioning=None)
+
+        # 4. flatten and fully connected layer
         x = torch.flatten(x, start_dim=1)
-        # Pass through the fully connected layer for classification
         x = self.fc(x)
+
         return x
