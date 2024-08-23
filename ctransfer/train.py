@@ -122,21 +122,6 @@ parser.add_argument(
     help="summarizer to use",
     required=False,
 )
-parser.add_argument(
-    "--num_channels",
-    #default=(8, 16, 16, 8, 8, 8, 4, 2, 2),
-    default=(32, 32, 16,  8, 4,),
-    type=int,
-    help="base channel of ResNet",
-    required=False,
-)
-parser.add_argument(
-    "--num_blocks",
-    default=2,
-    type=int,
-    help="number of downsizing blocks",
-    required=False,
-)
 
 # density estimator hparams 
 parser.add_argument(
@@ -190,19 +175,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--batch_size",
-    default=12,
+    default=24,
     type=int,
     help="batch size",
     required=False,
 )
 
-parser.add_argument(
-    "--accumulate_gradients",
-    default=None,
-    type=int,
-    help="steps to accumulate grads",
-    required=False,
-)
 parser.add_argument(
     "--num_workers",
     default=1,
@@ -279,7 +257,7 @@ def setup_trainer(args, total_steps: int, logger: WandbLogger, checkpoint_callba
         callbacks=[checkpoint_callback, early_callback],
         devices=1,
         num_sanity_val_steps=2,
-        val_check_interval=0.25,
+        val_check_interval=0.5,
     )
 
 
@@ -320,10 +298,12 @@ def train(args):
         phase='baseline',
     )
     wandb_logger = WandbLogger(project="ctransfer", log_model=False, name=args.run_name if args.run_name else None)
+    wandb_logger.experiment.config.update(vars(args))
     run_name = wandb_logger.experiment.name
     checkpoint_callback = ModelCheckpoint(
         dirpath=Path(args.output_dir) / f"{run_name}",
         save_top_k=3,
+        mode='min',
         monitor="baseline_val_loss",
         save_last=True,
         auto_insert_metric_name=True,
@@ -366,7 +346,6 @@ def train(args):
 
     if args.n_shots > 0:
         # ****** Use representation in a downstream task ****** #
-        few_shot_massive_neutrinos = True if 'M_nu' in args.few_shot_cosmological_parameters else False
         few_shot_train_loader = setup_data(
             args,
             root_dir=few_shot_root_dir,
@@ -408,6 +387,7 @@ def train(args):
         checkpoint_callback = ModelCheckpoint(
             dirpath=Path(args.output_dir) / f"{run_name}_few_shot",
             save_top_k=3,
+            mode="min",
             monitor="few_shot_val_loss",
             save_last=True,
             auto_insert_metric_name=True,
@@ -426,7 +406,7 @@ def train(args):
             train_dataloaders=few_shot_train_loader,
             val_dataloaders=few_shot_val_loader,
         )
-        few_shot_trainer.test(dataloaders=few_shot_test_loader, ckpt_path="best")
+        few_shot_trainer.test(dataloaders=few_shot_test_loader, ckpt_path="last")
 
 
 if __name__ == "__main__":
